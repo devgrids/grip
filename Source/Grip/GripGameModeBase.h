@@ -7,11 +7,10 @@
 #include "GripGameModeBase.generated.h"
 
 /**
- * 
+ *
  */
 UCLASS()
 class GRIP_API AGripGameModeBase : public AGameModeBase
 {
 	GENERATED_BODY()
-	
 };
