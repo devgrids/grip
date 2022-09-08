@@ -374,6 +374,132 @@ struct FVehicleElimination
 	static USoundCue* AlertSound;
 };
 
+#pragma region VehicleContactSensors
+
+/**
+* A structure to describe the wheels as a whole for a vehicle. Not only do we
+* store all of the wheels themselves here, but we also have a lot of data related
+* to steering and trying to determine the nearest driving surface direction from
+* the wheel contact sensors, and therefore the flipped state of the vehicle.
+* There's also some data regarding powered wheel simulation.
+***********************************************************************************/
+
+struct FVehicleWheels
+{
+	FVehicleWheels()
+	{ BurnoutDirection = ((FMath::Rand() & 1) == 0) ? -1.0f : +1.0f; }
+
+	// Do we have a nearest surface direction indicated by the wheels?
+	bool HasSurfaceDirection() const
+	{ return DetectedSurfaces; }
+
+	// Do we have high confidence in the nearest surface direction indicated by the wheels?
+	bool HasConfidentSurfaceDirection() const
+	{ return SurfacesVincinal; }
+
+	// Is the vehicle shortly going to need to be flipped?
+	bool SoftFlipped = false;
+
+	// Is the vehicle flipped?
+	bool HardFlipped = false;
+
+	// Have we detected surfaces from the wheels?
+	bool DetectedSurfaces = false;
+
+	// Are the detected surfaces close to the wheels?
+	bool SurfacesVincinal = false;
+
+	// State used in detecting the nearest driving surface from the wheels.
+	int32 FlipDetection = 0;
+
+	// Timer used in flipping the springs / wheel positions.
+	float FlipTimer = 0.0f;
+
+	// The steering value of the front wheels, in degrees.
+	float FrontSteeringAngle = 0.0f;
+
+	// The steering value of the back wheels, in degrees.
+	float BackSteeringAngle = 0.0f;
+
+	// The visual steering value of the front wheels, in degrees.
+	float FrontVisualSteeringAngle = 0.0f;
+
+	// The visual steering value of the back wheels, in degrees.
+	float BackVisualSteeringAngle = 0.0f;
+
+	// Should we spin the wheels when throttle is applied?
+	bool SpinWheelsOnStart = false;
+
+	// The current burnout direction.
+	float BurnoutDirection = 0.0f;
+
+	// The amount of sideways force to use in applying a burnout.
+	float BurnoutForce = 0.0f;
+
+	// A ration of angular velocity current in a burnout.
+	float BurnoutPhaseOut = 0.0f;
+
+	// The last time we were grounded, which contact sensor set where we using (0 or 1).
+	int32 GroundedSensorSet = 1;
+
+	// The number of wheels currently in contact with a surface.
+	int32 NumWheelsInContact = 0;
+
+	// Is a wheel on the rear axle currently in contact with a surface?
+	bool RearWheelDown = false;
+
+	// Is a wheel on the front axle currently in contact with a surface?
+	bool FrontWheelDown = false;
+
+	// Are all the wheels on the rear axle currently in contact with a surface?
+	bool RearAxleDown = false;
+
+	// Are all the wheels on the front axle currently in contact with a surface?
+	bool FrontAxleDown = false;
+
+	// The X position of the rear axle in local space.
+	float RearAxleOffset = 0.0f;
+
+	// The X position of the front axle in local space.
+	float FrontAxleOffset = 0.0f;
+
+	// The position of the rear axle in world space.
+	FVector RearAxlePosition = FVector::ZeroVector;
+
+	// The position of the front axle in world space.
+	FVector FrontAxlePosition = FVector::ZeroVector;
+
+	// The number of rotations per second for the wheels.
+	float WheelRPS = 0.0f;
+	float WheelRPSUnflipped = 0.0f;
+
+	// A ratio used to indicate how fast the wheels are spinning.
+	float SpinRatio = 0.0f;
+
+	// Are the springs compressed hard?
+	bool HardCompression = false;
+
+	// The time since the last hard compression.
+	float HardCompressionTime = 0.0f;
+
+	// The name of the surface the vehicle is currently driving on.
+	FName SurfaceName;
+
+	// Timer used to remove glitches from skidding.
+	float SkidTimer = 0.0f;
+
+	// The target for the skid audio volume.
+	float SkidAudioVolumeTarget = 0.0f;
+
+	// The target for the spin audio volume.
+	float SpinAudioVolumeTarget = 0.0f;
+
+	// The wheels attached to the vehicle.
+	TArray<FVehicleWheel> Wheels;
+};
+
+#pragma endregion VehicleContactSensors
+
 #pragma region VehicleDamage
 
 /**
@@ -954,19 +1080,247 @@ private:
 
 public:
 
+	// The wheel properties for the vehicle.
+	const FVehicleWheels& GetWheels() const
+	{ return Wheels; }
+
 	// Is the vehicle going to need to be flipped?
 	bool IsFlipped() const
-	{ return false; }
+	{ return Wheels.SoftFlipped; }
 
 	// Is the vehicle currently flipped?
 	bool IsFlippedAndWheelsOnGround() const
-	{ return false; }
+	{ return Wheels.HardFlipped; }
+
+	// Is the vehicle currently with all wheels (more or less) on the ground?
+	bool IsPracticallyGrounded(float distance = 50.0f, bool anyWheel = false);
+
+	// Get the average distance of the wheels from the vehicle to the nearest driving surface, 0 for not near any driving surface.
+	float GetSurfaceDistance(bool discountFrontWheelsWhenRaised, bool closest = false);
+
+	// Get the direction from the vehicle to the nearest driving surface.
+	FVector GetSurfaceDirection();
 
 	// Get the direction from the vehicle to launch weapons from, often opposing the nearest surface direction.
-	FVector GetLaunchDirection(bool inContact = false) const
-	{ FVector zdirection = GetUpDirection(); return ((zdirection.Z <= 0.0f) ? zdirection : zdirection * -1.0f); }
+	FVector GetLaunchDirection(bool inContact = false) const;
+
+	// Guess the normal of the nearest driving surface.
+	FVector GuessSurfaceNormal() const;
+
+	// Do we have a valid surface contact, optionally over a period of seconds.
+	bool IsSurfaceDirectionValid(float contactSeconds);
+
+	// Get the location of the nearest driving surface to the center of the vehicle.
+	FVector GetSurfaceLocation() const;
+
+private:
+
+	// Get the maximum of all the wheel radii.
+	float GetMaxWheelRadius()
+	{
+		float radius = 0.0f;
+
+		for (const FWheelAssignment& assignment : WheelAssignments)
+		{
+			radius = FMath::Max(radius, assignment.Radius);
+		}
+
+		return radius;
+	}
+
+	// Are we wheel spinning right now?
+	bool SpinningTheWheel() const
+	{ return (StandingStart == true && Wheels.SpinWheelsOnStart == true && FMath::Abs(Wheels.WheelRPS) > 1.0f && (FMath::Abs(Propulsion.PistonEngineThrottle) > KINDA_SMALL_NUMBER || IsPowerAvailable() == false)); }
+
+	// Is the wheel currently driven by the engine? If not then it's free-wheeling.
+	bool IsWheelDriven(FVehicleWheel& wheel) const
+	{
+		return ((VehicleEngineModel->WheelDriveModel == EWheelDriveModel::AllWheel) ||
+			(VehicleEngineModel->WheelDriveModel == EWheelDriveModel::RearWheel && wheel.HasRearPlacement() == true) ||
+			(VehicleEngineModel->WheelDriveModel == EWheelDriveModel::FrontWheel && wheel.HasFrontPlacement() == true));
+	}
+
+	// Is the wheel fitted with brakes.
+	bool IsWheelBraked(FVehicleWheel& wheel) const
+	{
+		return ((TireFrictionModel->BrakeAssignment == EWheelDriveModel::AllWheel) ||
+			(TireFrictionModel->BrakeAssignment == EWheelDriveModel::RearWheel && wheel.HasRearPlacement() == true) ||
+			(TireFrictionModel->BrakeAssignment == EWheelDriveModel::FrontWheel && wheel.HasFrontPlacement() == true));
+	}
+
+	// Get the location of the bone for a wheel of a given index, in world space.
+	FVector GetWheelBoneLocationFromIndex(int32 index)
+	{ return GetWheelBoneLocation(Wheels.Wheels[index], VehicleMesh->GetComponentTransform()); }
+
+	// Get the location of the bone for a wheel, in world space.
+	// Optionally clipped on the Y axis to within the bounds of the collision shape.
+	static FVector GetWheelBoneLocation(const FVehicleWheel& wheel, const FTransform& transform, bool clipToCollision = false);
+
+	// Get the location to apply suspension forces to for a particular wheel in world space.
+	FVector GetSuspensionForcesLocation(const FVehicleWheel& wheel, const FTransform& transform, float deltaSeconds);
+
+	// Get the steering angle for a wheel index of the vehicle, in degrees.
+	float GetVisualSteeringAngle(FVehicleWheel& wheel) const
+	{ return (wheel.HasFrontPlacement() == true) ? Wheels.FrontVisualSteeringAngle : (wheel.HasRearPlacement() == true) ? Wheels.BackVisualSteeringAngle : 0.0f; }
+
+	// Get the number of wheels attached to the vehicle, optionally just the wheels that have tire grip.
+	int32 GetNumWheels(bool grippingOnly = false) const
+	{
+		if (grippingOnly == true)
+		{
+			int32 numWheels = 0;
+
+			for (const FVehicleWheel& wheel : Wheels.Wheels)
+			{
+				if (wheel.HasCenterPlacement() == false)
+				{
+					numWheels++;
+				}
+			}
+
+			return numWheels;
+		}
+
+		return Wheels.Wheels.Num();
+	}
+
+	// Get how much grip we should apply to a particular contact sensor at this time.
+	float GetGripRatio(const FVehicleContactSensor& sensor) const;
+
+	// Get the normal of the nearest driving surface.
+	FVector GetSurfaceNormal() const;
+
+	// Update the contact sensors.
+	int32 UpdateContactSensors(float deltaSeconds, const FTransform& transform, const FVector& xdirection, const FVector& ydirection, const FVector& zdirection);
+
+	// Get the name of the surface the vehicle is currently driving on.
+	FName GetSurfaceName() const
+	{ return Wheels.SurfaceName; }
+
+	// Are we allowed to engage the throttle to the wheels? (correct race state)
+	bool IsPowerAvailable() const;
+
+	// Get the standard position of the bone for a wheel, in world space.
+	// This is normally for applying grip forces, and standard bone positions
+	// are used to apply symmetrical forces no-matter what the configuration.
+	static FVector GetStandardWheelLocation(const FVehicleWheel& wheel, const FTransform& transform)
+	{ return transform.TransformPosition(wheel.StandardBoneOffset); }
+
+	// Get the name of a surface from its type.
+	static FName GetNameFromSurfaceType(EGameSurface surfaceType);
+
+	// The wheels / springs and associated properties for the vehicle.
+	FVehicleWheels Wheels;
 
 #pragma endregion VehicleContactSensors
+
+#pragma region VehicleBasicForces
+
+public:
+
+	// Get the predicted velocity based on recorded velocity information.
+	FVector GetPredictedVelocity() const;
+
+private:
+
+	// Arrest the vehicle until the game has started.
+	void ArrestVehicle();
+
+	// Update the power and gearing, returns true if just shifted up a gear.
+	void UpdatePowerAndGearing(float deltaSeconds, const FVector& xdirection, const FVector& zdirection);
+
+	// Get the engine power applied at this point in time if we were to use full throttle.
+	float GetJetEnginePower(int32 numWheelsInContact, const FVector& xdirection);
+
+	// Get the force of gravity to apply to the vehicle over one second.
+	FVector GetGravityForce(bool totalGravity) const;
+
+	// Get the drag force based on the velocity given and the vehicle's drag coefficient.
+	FVector GetDragForceFor(FVector velocity) const;
+
+	// Get the drag force based on the velocity of the vehicle and its drag coefficient.
+	FVector GetDragForce() const
+	{ return GetDragForceFor(Physics.VelocityData.Velocity); }
+
+	// Get the rolling resistance force based on the velocity given and the vehicle's rolling resistance coefficient.
+	FVector GetRollingResistanceForceFor(float speed, const FVector& velocityDirection, const FVector& xdirection) const;
+
+	// Get the rolling resistance force based on the velocity of the vehicle and its rolling resistance coefficient.
+	FVector GetRollingResistanceForce(const FVector& xdirection) const
+	{ return GetRollingResistanceForceFor(Physics.VelocityData.Speed, Physics.VelocityData.VelocityDirection, xdirection); }
+
+	// Get the down force based on the velocity of the vehicle and its down force coefficient, in meters per second.
+	FVector GetDownForce();
+
+	// Is a pickup currently charging at all?
+	bool PickupIsCharging(bool ignoreTurbos)
+	{ return false; }
+
+	// Get the speed range for a single gear.
+	// This is for piston engine simulation.
+	float GetGearSpeedRange() const
+	{ return VehicleEngineModel->GearSpeedRange; }
+
+#pragma endregion VehicleBasicForces
+
+#pragma region VehicleControls
+
+public:
+
+	// The state of control over the vehicle.
+	const FVehicleControl& GetVehicleControl() const
+	{ return Control; }
+
+private:
+
+	// Control the forwards / backwards motion, the value will be somewhere between -1 and +1, often at 0 or the extremes.
+	void Throttle(float value, bool bot);
+
+	// Control the left / right motion, the value will be somewhere between -1 and +1.
+	void Steering(float value, bool analog, bool bot);
+
+	// Engage the brake.
+	void HandbrakePressed(bool bot);
+
+	// Release the brake.
+	void HandbrakeReleased(bool bot);
+
+	// Control the forwards / backwards motion, the value will be somewhere between -1 and +1, often at 0 or the extremes.
+	void Throttle(float value)
+	{ Throttle(value, false); }
+
+	// Control the left / right motion, the value will be somewhere between -1 and +1.
+	void AnalogSteering(float value)
+	{ Steering(value, true, false); }
+
+	// Control the left / right motion, the value will be somewhere between -1 and +1.
+	void DigitalSteering(float value)
+	{ Steering(value, false, false); }
+
+	// Engage the brake.
+	void HandbrakePressed()
+	{ HandbrakePressed(false); }
+
+	// Release the brake.
+	void HandbrakeReleased()
+	{ HandbrakeReleased(false); }
+
+	// Handle the use of automatic braking to assist the driver.
+	float AutoBrakePosition(const FVector& xdirection) const;
+
+	// Calculate the assisted throttle input for a player.
+	float CalculateAssistedThrottleInput();
+
+	// Interpolate the control inputs to give smooth changes to digital inputs.
+	void InterpolateControlInputs(float deltaSeconds);
+
+	// Handle the pitch control for airborne control.
+	void PitchControl(float value);
+
+	// Update the steering of the wheels.
+	void UpdateSteering(float deltaSeconds, const FVector& xdirection, const FVector& ydirection, const FQuat& quaternion);
+
+#pragma endregion VehicleControls
 
 #pragma region VehicleLaunch
 
@@ -1012,6 +1366,61 @@ public:
 	{ return false; }
 
 #pragma endregion PickupShield
+
+#pragma region VehicleSpringArm
+
+public:
+
+	// The angle that the rear-end is currently drifting at.
+	float GetSpringArmYaw() const;
+
+	// The roll angle.
+	float GetSpringArmRoll() const;
+
+	// Get the amount of shake to apply for the auto-boost.
+	float GetAutoBoostShake() const
+	{ return Propulsion.AutoBoostShake; }
+
+	// Has the vehicle just smashed into something and requires the forward-facing crash-camera?
+	bool HasSmashedIntoSomething(float maxKPH) const;
+
+private:
+
+	// Looking left.
+	void LeftViewCamera();
+
+	// Looking right.
+	void RightViewCamera();
+
+	// Looking forwards or backwards.
+	void LookForwards(float val);
+
+	// Looking left or right.
+	void LookSideways(float val);
+
+	// Ease the camera in toward the target.
+	void CameraIn()
+	{ CameraTarget()->SpringArm->CameraIn(); }
+
+	// Ease the camera out away from the target.
+	void CameraOut()
+	{ CameraTarget()->SpringArm->CameraOut(); }
+
+	// Looking front.
+	void FrontViewCamera()
+	{ CameraTarget()->SpringArm->FrontViewCamera(GameState->GeneralOptions.InstantaneousLook); }
+
+	// Looking rear.
+	void RearViewCamera()
+	{ CameraTarget()->SpringArm->RearViewCamera(GameState->GeneralOptions.InstantaneousLook); }
+
+	// Update the materials used to render the vehicle based on cockpit-camera state.
+	void UpdateCockpitMaterials();
+
+	// Indicator as to whether we're currently using cockpit-camera materials or not.
+	bool UsingCockpitMaterial = false;
+
+#pragma endregion VehicleSpringArm
 
 #pragma region VehicleHUD
 
@@ -1215,7 +1624,9 @@ public:
 	// Is the vehicle current using cockpit-camera view?
 	UFUNCTION(BlueprintCallable, Category = "General")
 		bool IsCockpitView() const
-	{ return false; }
+	{
+		return (IsCinematicCameraActive() == true) ? false : SpringArm->IsCockpitView();
+	}
 
 	// Cycle through the camera points on the vehicle.
 	UFUNCTION(BlueprintCallable, Category = System)
@@ -1326,7 +1737,7 @@ public:
 
 	// Get the position within the current gear that the emulated piston engine is at, between 0 and 1.
 	float GearPosition() const
-	{ return 0.0f; }
+	{ return Propulsion.CurrentGearPosition; }
 
 	// The unique index number of the vehicle.
 	int32 VehicleIndex = 0;

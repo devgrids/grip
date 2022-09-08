@@ -29,6 +29,20 @@ ULightStreakComponent::ULightStreakComponent()
 	bWantsInitializeComponent = true;
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_DuringPhysics;
+
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> asset(TEXT("Material'/Game/Vehicles/Materials/LightStreaks/M_StandardLightStreak.M_StandardLightStreak'"));
+		StandardStreakMaterial = asset.Object;
+	}
+
+	StreakMaterial = StandardStreakMaterial;
+
+	{
+		static ConstructorHelpers::FObjectFinder<UMaterialInterface> asset(TEXT("Material'/Game/Vehicles/Materials/LightStreaks/M_StandardLightQuad.M_StandardLightQuad'"));
+		StandardFlareMaterial = asset.Object;
+	}
+
+	FlareMaterial = StandardFlareMaterial;
 }
 
 /**
