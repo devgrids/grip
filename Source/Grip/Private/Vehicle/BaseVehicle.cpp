@@ -759,6 +759,48 @@ void ABaseVehicle::SetupExtraCollision()
 		CameraClipBox = FBox(extent * -1.0f, extent);
 
 		BoundingExtent = extent + FVector(5.0f, 5.0f, 10.0f);
+
+#pragma region VehicleCollision
+
+		// Scale and expand the box extent for a new vehicle / vehicle collision component.
+
+		extent /= VehicleMesh->GetRelativeScale3D();
+		extent += FVector(5.0f, 5.0f, 10.0f);
+
+		// Create a new box component to handle the vehicle / vehicle collision.
+
+		VehicleCollision = NewObject<UBoxComponent>(this, TEXT("VehicleShell"));
+
+		// Ensure that we set the profile to VehicleShell so it has the correct collision detection properties.
+
+		VehicleCollision->SetCollisionProfileName((PlayGameMode != nullptr) ? "VehicleShell" : "NoCollision");
+		VehicleCollision->SetBoxExtent(extent);
+		VehicleCollision->SetHiddenInGame(true);
+		VehicleCollision->SetLinearDamping(0.0f);
+		VehicleCollision->SetAngularDamping(0.0f);
+		VehicleCollision->SetEnableGravity(false);
+		VehicleCollision->SetMassOverrideInKg(NAME_None, 1.0f, true);
+		VehicleCollision->SetGenerateOverlapEvents(true);
+		VehicleCollision->ShapeColor = FColor::Green;
+
+		// Now setup the body instance for this box component and ensure that we have contact modification enabled.
+
+		VehicleCollision->GetBodyInstance()->bNotifyRigidBodyCollision = true;
+		VehicleCollision->GetBodyInstance()->SetContactModification(true);
+		VehicleCollision->GetBodyInstance()->SetEnableGravity(false);
+		VehicleCollision->GetBodyInstance()->SetMaxDepenetrationVelocity(maxDepenetration);
+		VehicleCollision->GetBodyInstance()->SetPhysMaterialOverride(material);
+
+#if GRIP_ENGINE_PHYSICS_MODIFIED
+		VehicleCollision->GetBodyInstance()->bCentraliseMass = true;
+#endif // GRIP_ENGINE_PHYSICS_MODIFIED
+
+		GRIP_ATTACH(VehicleCollision, VehicleMesh, NAME_None);
+
+		VehicleCollision->RegisterComponent();
+
+#pragma endregion VehicleCollision
+
 	}
 }
 

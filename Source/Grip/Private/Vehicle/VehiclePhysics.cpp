@@ -1553,6 +1553,48 @@ float ABaseVehicle::GetWeightActingOnWheel(FVehicleWheel& wheel)
 
 bool ABaseVehicle::ModifyContact(uint32 bodyIndex, AActor* other, physx::PxContactSet& contacts)
 {
+
+#pragma region VehicleCollision
+
+	float stockVehicleCollisionInertia = 0.1f;
+	float vehicleCollisionInertia = stockVehicleCollisionInertia;
+
+	// We've hit something so unlock the idle state.
+
+	VehicleMesh->IdleUnlock();
+
+	if (other != nullptr)
+	{
+		ABaseVehicle* otherVehicle = Cast<ABaseVehicle>(other);
+
+		if (otherVehicle != nullptr)
+		{
+			// Unlock the idle state for the opposing vehicle.
+
+			otherVehicle->VehicleMesh->IdleUnlock();
+
+			// Vehicle / vehicle collision - try to prevent twisting motion, within reason.
+			// The more parallel the vehicles are then the more we attempt to stop the twisting.
+
+			float dp = FVector::DotProduct(GetVelocityOrFacingDirection(), otherVehicle->GetVelocityOrFacingDirection());
+
+			vehicleCollisionInertia = FMath::Lerp(vehicleCollisionInertia * 2.0f, vehicleCollisionInertia, FMath::Pow(FMath::Abs(dp), 0.5f));
+
+			// Depending on which body we are, set the contact accordingly.
+
+			if (bodyIndex == 0)
+			{
+				contacts.setInvInertiaScale0(vehicleCollisionInertia);
+			}
+			else if (bodyIndex == 1)
+			{
+				contacts.setInvInertiaScale1(vehicleCollisionInertia);
+			}
+		}
+	}
+
+#pragma endregion VehicleCollision
+
 	return false;
 }
 
