@@ -1322,6 +1322,49 @@ private:
 
 #pragma endregion VehicleControls
 
+#pragma region VehicleGrip
+
+private:
+
+	// Calculate the rotations per second rate of a wheel.
+	void CalculateWheelRotationRate(FVehicleWheel& wheel, const FVector& velocityDirection, float vehicleSpeed, float brakePosition, float deltaSeconds);
+
+	// Get the lateral friction for a dot product result between normalized wheel velocity vs the wheel side vector.
+	float LateralFriction(float baselineFriction, float sideSlip, FVehicleWheel& wheel) const;
+
+	// Calculate the longitudinal grip ratio for a slip value.
+	float CalculateLongitudinalGripRatioForSlip(float slip) const;
+
+	// Get the horizontal velocity vector for a wheel, for use in slip calculations.
+	static FVector GetHorizontalVelocity(const FVehicleWheel& wheel, const FTransform& transform);
+
+	// Get the horizontal velocity vector for a wheel, for use in slip calculations.
+	FVector GetHorizontalVelocity(const FVehicleWheel& wheel)
+	{ const FTransform& transform = VehicleMesh->GetComponentTransform(); return GetHorizontalVelocity(wheel, transform); }
+
+	// Get the weight acting on a wheel for this point in time, in kilograms.
+	float GetWeightActingOnWheel(FVehicleWheel& wheel);
+
+#pragma endregion VehicleGrip
+
+#pragma region VehicleAnimation
+
+private:
+
+	// Apply a visual roll to add tilt to the vehicle when cornering and most of the wheels are on the ground.
+	void UpdateVisualRotation(float deltaSeconds, const FVector& xdirection, const FVector& ydirection);
+
+	// Update the animated bones.
+	void UpdateAnimatedBones(float deltaSeconds, const FVector& xdirection, const FVector& ydirection);
+
+	// When killing controlled vehicle body pitch, the pitch angle we're starting from.
+	float VehiclePitchFrom = 0.0f;
+
+	// Time accumulator used When killing controlled vehicle body pitch.
+	float VehiclePitchAccumulator = 0.0f;
+
+#pragma endregion VehicleAnimation
+
 #pragma region VehicleLaunch
 
 private:

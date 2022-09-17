@@ -283,6 +283,27 @@ void ABaseVehicle::PostInitializeComponents()
 			FVector standardOffset = FVector(boneOffset.X, boneOffset.Y, 0.0f);
 			FVector suspensionForcesOffset = standardOffset;
 
+#pragma region VehicleGrip
+
+			if (TireFrictionModel != nullptr &&
+				TireFrictionModel->Model == ETireFrictionModel::Arcade)
+			{
+				// This standard offset is use purely for the application of grip, in order to bring predictable
+				// handling to the vehicles. If we don't do this, we'll have the back-end spin-out when cornering
+				// hard for example. Setting the application of grip at relatively fixed offsets around the
+				// vehicle helps a lot to reduce unwanted, inconsistent behavior across different vehicles.
+
+				standardOffset = FVector(0.0f, boneOffset.Y, 0.0f);
+
+				if (placement == EWheelPlacement::Rear ||
+					placement == EWheelPlacement::Front)
+				{
+					standardOffset.X = 175.0f * FMathEx::UnitSign(boneOffset.X);
+				}
+			}
+
+#pragma endregion VehicleGrip
+
 			// Create the wheel from the data we now have.
 
 			FVehicleWheel wheel = FVehicleWheel(boneName, boneOffset, standardOffset, suspensionForcesOffset, placement, assignment.Width, assignment.Radius);
@@ -505,6 +526,15 @@ void ABaseVehicle::Tick(float deltaSeconds)
 	UpdateSteering(deltaSeconds, xdirection, ydirection, quaternion);
 
 #pragma endregion VehicleControls
+
+#pragma region VehicleAnimation
+
+	// Update the animated bones, mostly related to having the wheels animate with rolling,
+	// steering and suspension movement.
+
+	UpdateAnimatedBones(deltaSeconds, xdirection, ydirection);
+
+#pragma endregion VehicleAnimation
 
 #pragma region VehicleBasicForces
 
@@ -1744,6 +1774,154 @@ void ABaseVehicle::PitchControl(float value)
 
 #pragma endregion VehicleControls
 
+#pragma region VehicleAnimation
+
+/**
+* Update the animated bones.
+***********************************************************************************/
+
+void ABaseVehicle::UpdateAnimatedBones(float deltaSeconds, const FVector& xdirection, const FVector& ydirection)
+{
+	float shiftVertical = 0.0f;
+
+	for (int32 wheelIndex = 0; wheelIndex < GetNumWheels(); wheelIndex++)
+	{
+		FVehicleWheel& wheel = Wheels.Wheels[wheelIndex];
+
+		if (Antigravity == false)
+		{
+			// Setup the wheel rotations for rendering with.
+
+			WheelRotations[wheelIndex].Yaw = GetVisualSteeringAngle(wheel);
+
+			// We're rolling the wheel so just add in the rotations for this frame.
+
+			WheelRotations[wheelIndex].Pitch += wheel.RPS * deltaSeconds * 360.0f;
+			WheelRotations[wheelIndex].Pitch = FMath::Fmod(WheelRotations[wheelIndex].Pitch, 3600.0f * FMathEx::UnitSign(WheelRotations[wheelIndex].Pitch));
+		}
+
+		// Setup the offset of the wheel to be rendered with.
+
+		WheelOffsets[wheelIndex].Z = wheel.GetActiveSensor().GetExtension();
+
+		float travel = MaximumWheelTravel;
+
+		if (WheelOffsets[wheelIndex].Z > travel)
+		{
+			shiftVertical += WheelOffsets[wheelIndex].Z - travel;
+		}
+		else if (WheelOffsets[wheelIndex].Z < -travel)
+		{
+			shiftVertical += WheelOffsets[wheelIndex].Z + travel;
+		}
+
+		if (Wheels.FlipTimer > 0.0f)
+		{
+			FVehicleContactSensor& sensor = wheel.Sensors[wheel.SensorIndex ^ 1];
+
+			WheelOffsets[wheelIndex].Z = FMath::Lerp(WheelOffsets[wheelIndex].Z, sensor.GetExtension(), Wheels.FlipTimer);
+		}
+	}
+
+	VehicleOffset.Z = shiftVertical / (float)GetNumWheels();
+
+	// Apply a visual roll to add tilt to the vehicle when cornering and most
+	// of the wheels are on the ground.
+
+	UpdateVisualRotation(deltaSeconds, xdirection, ydirection);
+}
+
+/**
+* Apply a visual roll to add tilt to the vehicle when cornering and most of the
+* wheels are on the ground.
+***********************************************************************************/
+
+void ABaseVehicle::UpdateVisualRotation(float deltaSeconds, const FVector& xdirection, const FVector& ydirection)
+{
+	float clock = VehicleClock;
+	float torqueRoll = (AI.TorqueRoll * 0.15f) + (FMath::Sin(clock * AI.TorqueRoll * 100.0f) * 0.2f * AI.TorqueRoll);
+
+	if (GetSpeedMPS() > 1.0f &&
+		Wheels.NumWheelsInContact > (GetNumWheels() >> 1))
+	{
+		// First calculate the pitch of the vehicle based on acceleration on the vehicle's X axis.
+		// This will make the back-end dip when accelerating and raise when decelerating. This would
+		// normally be done through dynamic loading on the suspension in a driving simulator but would
+		// result in far too much instability in GRIP. So we provide visual indicators only here.
+
+		float ratio = FMathEx::GetSmoothingRatio(0.9f, deltaSeconds);
+		float pitch = FMath::Clamp(FMathEx::CentimetersToMeters(Physics.VelocityData.AccelerationLocalSpace.X) * -0.1f * BrakingLeanScale, -BrakingLeanMaximum, BrakingLeanMaximum);
+
+		if (IsFlipped() == false)
+		{
+			pitch *= -1.0f;
+		}
+
+		VehicleRotation.Pitch = FMath::Lerp(pitch, VehicleRotation.Pitch, ratio);
+
+		// Now calculate the roll angle of the vehicle, based on how hard it's cornering.
+		// Use the lateral forces on the tires to gauge where we're trying to push the vehicle towards.
+		// We use this TwoFrameLateralForceStrength variable as it is an average of lateral force applied
+		// over the last couple of frames, and therefore avoids the innate ping-ponging effect lateral
+		// forces have of shifting a vehicle one way and then the next when not cornering sufficient hard.
+
+		float lateralForce = 0.0f;
+		float lateralForceSum = 0.0f;
+
+		for (FVehicleWheel& wheel : Wheels.Wheels)
+		{
+			if (wheel.GetActiveSensor().IsInContact() == true)
+			{
+				lateralForce += wheel.TwoFrameLateralForceStrength;
+				break;
+			}
+		}
+
+		if (lateralForceSum != 0.0f)
+		{
+			lateralForce /= lateralForceSum;
+		}
+
+		ratio = FMathEx::GetSmoothingRatio(0.95f, deltaSeconds);
+
+		// Note that we have to ignore anything under 50KPH as we get rogue forces in this regime.
+
+		float scale = FMath::Pow(FMathEx::GetRatio(GetSpeedKPH(), 50.0f, 250.0f), 0.5f);
+
+		lateralForce *= scale;
+
+		// Now we have the lateral force computed, convert that into a body roll value.
+
+		float roll = lateralForce * 0.04f;
+
+		roll = (FMath::Abs(roll) < 0.25f) ? 0.0f : roll - 0.25f * FMathEx::UnitSign(roll);
+		roll = FMath::Clamp(roll * CorneringLeanScale, -CorneringLeanMaximum, CorneringLeanMaximum);
+		roll *= 1.0f - Control.BrakePosition;
+
+		if (IsFlipped() == false)
+		{
+			roll *= -1.0f;
+		}
+
+		VehicleRotation.Roll = (VehicleRotation.Roll * ratio) + (roll * (1.0f - ratio)) + torqueRoll;
+		VehiclePitchAccumulator = 0.0f;
+		VehiclePitchFrom = VehicleRotation.Pitch;
+	}
+	else
+	{
+		// Gently kill pitch and roll when moving real slow.
+
+		float ratio = FMathEx::GetSmoothingRatio(0.95f, deltaSeconds);
+
+		VehiclePitchAccumulator += deltaSeconds * 0.5f;
+
+		VehicleRotation.Roll = (VehicleRotation.Roll * ratio) + torqueRoll;
+		VehicleRotation.Pitch = FMath::Lerp(VehiclePitchFrom, 0.0f, FMathEx::EaseInOut(FMath::Min(1.0f, VehiclePitchAccumulator), 3.0f));
+	}
+}
+
+#pragma endregion VehicleAnimation
+
 #pragma region VehicleSpringArm
 
 /**
@@ -2578,6 +2756,38 @@ void ABaseVehicle::UpdateIdleLock()
 
 	if (VehicleMesh->IsIdle() == false)
 	{
+
+#pragma region VehicleGrip
+
+		// Determine if the vehicle is idle and lock it in place if it is.
+
+		if (Antigravity == false &&
+			IsGrounded() == true &&
+			GetSpeedKPH() <= 1.0f &&
+			FMath::Abs(Control.ThrottleInput) <= 0.1f &&
+			FMath::Abs(FVector::DotProduct(GetLaunchDirection(), FVector(0.0f, 0.0f, 1.0f))) > 0.5f)
+		{
+			bool idle = true;
+
+			for (FVehicleWheel& wheel : Wheels.Wheels)
+			{
+				if (wheel.GetActiveSensor().IsAtRest() == false ||
+					wheel.GetActiveSensor().IsInContact() == false ||
+					wheel.GetActiveSensor().GetHitResult().Component->Mobility != EComponentMobility::Static)
+				{
+					idle = false;
+					break;
+				}
+			}
+
+			if (idle == true)
+			{
+				VehicleMesh->IdleAt(GetActorLocation(), GetActorQuat());
+			}
+		}
+
+#pragma endregion VehicleGrip
+
 	}
 	else
 	{

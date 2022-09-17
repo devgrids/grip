@@ -133,6 +133,13 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 	Physics.SpringScaleTimer = FMath::Max(Physics.SpringScaleTimer - deltaSeconds, 0.0f);
 	Physics.CurrentMass = Physics.StockMass;
 
+#pragma region VehicleGrip
+
+	float gripScale = 1.0f;
+	float steeringPosition = Control.SteeringPosition;
+
+#pragma endregion VehicleGrip
+
 #pragma region VehicleContactSensors
 
 	// Update the springs and record how many wheels are in contact with surfaces.
@@ -172,6 +179,45 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 
 #pragma endregion VehicleControls
 
+#pragma region VehicleGrip
+
+	// Calculate the front and rear axle positions, as well as whether all of their wheels are in
+	// contact with the driving surface.
+
+	Wheels.RearAxleDown = true;
+	Wheels.FrontAxleDown = true;
+	Wheels.RearWheelDown = false;
+	Wheels.FrontWheelDown = false;
+
+	float rearCompression = 0.0f;
+	float frontCompression = 0.0f;
+
+	for (FVehicleWheel& wheel : Wheels.Wheels)
+	{
+		if (wheel.HasFrontPlacement() == true)
+		{
+			Wheels.FrontAxleDown &= wheel.GetActiveSensor().IsInEffect();
+			Wheels.FrontWheelDown |= wheel.GetActiveSensor().IsInEffect();
+
+			if (wheel.GetActiveSensor().IsInContact() == true)
+			{
+				frontCompression = FMath::Max(frontCompression, wheel.GetActiveSensor().GetNormalizedCompression());
+			}
+		}
+		else if (wheel.HasRearPlacement() == true)
+		{
+			Wheels.RearAxleDown &= wheel.GetActiveSensor().IsInEffect();
+			Wheels.RearWheelDown |= wheel.GetActiveSensor().IsInEffect();
+
+			if (wheel.GetActiveSensor().IsInContact() == true)
+			{
+				rearCompression = FMath::Max(rearCompression, wheel.GetActiveSensor().GetNormalizedCompression());
+			}
+		}
+	}
+
+#pragma endregion VehicleGrip
+
 #pragma region VehicleBasicForces
 
 	// General force scale, so we can easily modify all applied forces if desired.
@@ -190,6 +236,177 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 		wheel.Velocity = VehicleMesh->GetPhysicsLinearVelocityAtPoint(wheel.Location);
 		wheel.LateralForceVector = FVector::ZeroVector;
 	}
+
+#pragma endregion VehicleBasicForces
+
+#pragma region VehicleGrip
+
+	// Now, let's deal with all of the wheel forces.
+
+	float stablisingGripVsSpeed = TireFrictionModel->RearLateralGripVsSpeed.GetRichCurve()->Eval(GetSpeedKPH());
+
+	for (FVehicleWheel& wheel : Wheels.Wheels)
+	{
+		float surfaceFriction = 1.0f;
+		FVector wheelForce = FVector::ZeroVector;
+		FQuat wheelQuaternion = wheel.GetSteeringTransform(transformQuaternion, Antigravity);
+
+		if (DrivingSurfaceCharacteristics != nullptr)
+		{
+			EGameSurface surfaceType = wheel.GetActiveSensor().GetGameSurface();
+
+			surfaceFriction = DrivingSurfaceCharacteristics->GetTireFriction(surfaceType);
+		}
+
+		// Calculate the rotations per second of the wheel. This also calculates its longitudinal
+		// slip which we'll use for braking shortly.
+
+		CalculateWheelRotationRate(wheel, GetVelocityOrFacingDirection(), Physics.VelocityData.Speed, brakePosition, deltaSeconds);
+
+		if (wheel.Velocity.SizeSquared() > 0.01f &&
+			wheel.GetActiveSensor().IsInContact() == true)
+		{
+			// Apply friction / traction if the wheel is in contact with a surface.
+
+			float weightOnWheel = GetWeightActingOnWheel(wheel);
+
+			// Handle the longitudinal braking.
+
+			bool fakeBrake = false;
+			float longitudinalSlip = wheel.LongitudinalSlip;
+			float longitudinalGripCoefficient = TireFrictionModel->LongitudinalGripCoefficient;
+
+			Physics.CentralizeGrip = false;
+
+			if (wheel.HasCenterPlacement() == false)
+			{
+				if ((longitudinalSlip > 0.0f) &&
+					(fakeBrake == true || brakePosition > 0.0f))
+				{
+					float longitudinalGrip = CalculateLongitudinalGripRatioForSlip(longitudinalSlip);
+
+					// Counter the velocity vector of the wheel with the longitudinal grip.
+					// Never impart movement on the local Z axis of the vehicle though, we
+					// only want horizontal forces.
+
+					FVector wheelVelocity = transform.InverseTransformVector(wheel.Velocity);
+
+					wheelVelocity.Z = 0.0f;
+					wheelVelocity.Normalize();
+					wheelVelocity = transform.TransformVectorNoScale(wheelVelocity);
+
+					FVector longitudinalForce = wheelVelocity * -longitudinalGripCoefficient * longitudinalGrip * weightOnWheel * forceScale * surfaceFriction * BrakingCoefficient * gripScale;
+
+					if (Physics.CentralizeGrip == true)
+					{
+						VehicleMesh->AddForceSubstep(longitudinalForce);
+					}
+					else
+					{
+						wheelForce += longitudinalForce;
+					}
+				}
+			}
+
+			// Now let's look at the lateral grip, stopping the tires from sliding sideways, which also
+			// handles the steering forces as a useful by-product.
+
+			float lateralGripScale = 1.0f;
+			float lateralForce = 0.0f;
+			FVector wyNormalized = wheelQuaternion.GetAxisY();
+
+			// Non-rolling wheels should have no lateral friction at all - it makes no sense to be able to
+			// steer when the wheels are not turning.
+
+			float absWheelRPS = FMath::Abs(wheel.RPS);
+			float rpsReduction = 1.0f - FMathEx::GetRatio(absWheelRPS, 0.0f, 0.005f);
+
+			// We have to kill lateral grip when the wheels aren't rotating, so rpsReduction is 1
+			// for full reduction and 0 for no reduction. Otherwise, you'd never be able to do a handbrake turn.
+
+			float lateralSlip = 0.0f;
+			FVector lateralAxis = wyNormalized;
+			FVector wvNormalized = GetHorizontalVelocity(wheel, transform);
+
+			if (wvNormalized.Normalize(0.01f) == true)
+			{
+				lateralSlip = FVector::DotProduct(wvNormalized, lateralAxis);
+			}
+
+			if (TireFrictionModel->Model == ETireFrictionModel::Arcade)
+			{
+				// Invert the lateral friction as we want to oppose the side-slip force.
+
+				lateralForce = -LateralFriction(lateralGripScale, lateralSlip, wheel);
+
+				float scaleGrip = 1.0f;
+
+				// Take the wheel side direction, then multiply by lateral force and the computed scales.
+
+				float lateralForceStrength = wheel.LateralForceStrength;
+
+				wheel.LateralForceStrength = lateralForce * scaleGrip;
+				wheel.LateralForceVector = lateralAxis * wheel.LateralForceStrength;
+				wheel.TwoFrameLateralForceStrength = (lateralForceStrength + wheel.LateralForceStrength) * 0.5f;
+
+				// We want to lose lateral grip when the wheels lock up - it makes no sense to be
+				// able to steer when the wheels are not turning.
+
+				wheel.LateralForceVector *= 1.0f - rpsReduction;
+
+				check(wheel.LateralForceVector.ContainsNaN() == false);
+
+				// The general lateral force calculation is now generally complete, and all that is left is to
+				// apply some playability hacks.
+			}
+
+			if (TireFrictionModel->Model == ETireFrictionModel::Arcade)
+			{
+				if (wheel.HasRearPlacement() == true &&
+					absWheelRPS > KINDA_SMALL_NUMBER)
+				{
+					float stablisingGrip = stablisingGripVsSpeed;
+
+					// Usually stablisingGrip gives more grip on the rear end to provide solid control.
+
+					// Handbrake turn, reducing any additional grip if we actively want the
+					// vehicle to spin around.
+
+					stablisingGrip = FMath::Lerp(stablisingGrip, HandBrakeRearGripRatio, brakePosition * FMath::Abs(steeringPosition));
+
+					wheel.LateralForceVector *= stablisingGrip;
+
+					check(FMath::IsNaN(stablisingGrip) == false);
+					check(wheel.LateralForceVector.ContainsNaN() == false);
+				}
+
+				// Now finally apply the lateral force.
+
+				check(wheel.LateralForceVector.ContainsNaN() == false);
+				check(FMath::IsNaN(weightOnWheel) == false);
+				check(FMath::IsNaN(forceScale) == false);
+				check(FMath::IsNaN(surfaceFriction) == false);
+
+				FVector lateralForceVector = wheel.LateralForceVector * weightOnWheel * forceScale * surfaceFriction * GripCoefficient * gripScale;
+
+				if (wheel.HasCenterPlacement() == false)
+				{
+					{
+						wheelForce += lateralForceVector;
+					}
+				}
+			}
+		}
+
+		if (wheelForce != FVector::ZeroVector)
+		{
+			VehicleMesh->AddForceAtLocationSubstep(wheelForce, wheel.Location);
+		}
+	}
+
+#pragma endregion VehicleGrip
+
+#pragma region VehicleBasicForces
 
 	FVector location = VehicleMesh->GetPhysicsLocation();
 	FVector movement = (firstFrame == true || Physics.ResetLastLocation == true) ? Physics.VelocityData.Velocity * deltaSeconds : location - Physics.LastLocation;
@@ -1116,6 +1333,212 @@ FVector ABaseVehicle::GetPredictedVelocity() const
 }
 
 #pragma endregion VehicleBasicForces
+
+#pragma region VehicleGrip
+
+/**
+* Calculate the rotations per second rate of a wheel.
+***********************************************************************************/
+
+void ABaseVehicle::CalculateWheelRotationRate(FVehicleWheel& wheel, const FVector& velocityDirection, float vehicleSpeed, float brakePosition, float deltaSeconds)
+{
+	float rps1 = 0.0f;
+	float rps0 = wheel.RPS;
+	float circumference = FMathEx::CentimetersToMeters(wheel.Radius) * PI * 2.0f;
+
+	vehicleSpeed = FMathEx::CentimetersToMeters(vehicleSpeed);
+
+	if (wheel.GetActiveSensor().IsInContact() == false)
+	{
+		// If we're airborne, and the wheel isn't a driven wheel, then slow it up a little.
+		// We're not really going to notice this in the game but it's physically correct.
+		// Reduce by half a rotation per second, stop at zero.
+
+		rps1 = rps0 - (0.5f * deltaSeconds * FMath::Sign(rps0));
+
+		// Clamp to zero if we've crossed that mark.
+
+		if (FMathEx::UnitSign(rps0) != FMathEx::UnitSign(rps1))
+		{
+			rps1 = 0.0f;
+		}
+
+		// Invert the rotation if necessary.
+
+		if (wheel.RPSFlipped != Wheels.SoftFlipped)
+		{
+			rps1 *= -1.0f;
+		}
+	}
+	else
+	{
+		// If the wheel is in contact with the ground, then we want the wheel rotate at the
+		// speed governed by the ground speed the vehicle is traveling.
+
+		// Find the angle of the wheel vs the velocity in the horizontal plane so we can figure out
+		// how much rotation to apply to the wheel. If they are parallel then full rotation and
+		// perpendicular then no rotation.
+
+		float dot = FVector::DotProduct(velocityDirection, wheel.Transform.GetAxisX());
+
+		// Take into account steering velocity vs direction.
+
+		rps1 = (vehicleSpeed / circumference) * dot;
+
+		// Rotate the other way if flipped upside-down.
+
+		if (Wheels.SoftFlipped == false)
+		{
+			rps1 *= -1.0f;
+		}
+	}
+
+	// So now rps1 is the "natural" rotation of the wheel.
+
+	wheel.RPSFlipped = Wheels.SoftFlipped;
+
+	// Now apply brakes to this wheel.
+
+	// Technically, it's much easier to skid at low speed than high, because of the slip ratio.
+
+	if ((brakePosition > 0.0f) &&
+		(IsWheelBraked(wheel) == true))
+	{
+		float decelerationMPS = TireFrictionModel->BrakingDeceleration * brakePosition;
+		float decelerationRPS = decelerationMPS / circumference;
+		float rps2 = rps0 - (decelerationRPS * deltaSeconds * FMath::Sign(rps0));
+
+		// Clamp to zero if we've crossed that mark.
+
+		if (FMathEx::UnitSign(rps0) != FMathEx::UnitSign(rps2))
+		{
+			rps2 = 0.0f;
+		}
+
+		rps1 = FMath::Min(FMath::Abs(rps1), FMath::Abs(rps2)) * FMathEx::UnitSign(rps1);
+	}
+
+	// rps0 is the current wheel rotation rate.
+	// rps1 is the rotation rate demanded by the ground speed or braked.
+
+	wheel.RPS = rps1;
+
+	if (vehicleSpeed < KINDA_SMALL_NUMBER ||
+		wheel.GetActiveSensor().IsInContact() == false)
+	{
+		// No slip if no speed or no contact.
+
+		wheel.LongitudinalSlip = 0.0f;
+	}
+	else
+	{
+		// Calculate the slip value for the tire vs the surface its on.
+		// This returns a ratio between 0 and +/-1. Negative values for the wheel spinning
+		// too fast (wheel spinning) and positive if too slow (braking).
+
+		vehicleSpeed *= FMathEx::UnitSign(Physics.VelocityData.DirectedSpeed);
+
+		wheel.LongitudinalSlip = (vehicleSpeed - (wheel.GetUnflippedRPS() * circumference)) / vehicleSpeed;
+	}
+}
+
+/**
+* Get the lateral friction for a dot product result between normalized wheel
+* velocity vs the wheel side vector. More side-slip should mean more lateral force.
+***********************************************************************************/
+
+float ABaseVehicle::LateralFriction(float baselineFriction, float sideSlip, FVehicleWheel& wheel) const
+{
+	// sideSlip is the cosine of the angle of the normalized wheel velocity vs the wheel side
+	// vector. so 0 means no side-slip and +-1 means full side slip. velocity is the wheel's
+	// velocity in meters per second.
+
+	float speed = wheel.Velocity.Size();
+
+	// Generally grip should be constant, but we add more at very speeds to avoid sliding around.
+	// (about 50% more)
+
+	float grip = TireFrictionModel->LateralGripVsSpeed.GetRichCurve()->Eval(FMathEx::CentimetersPerSecondToKilometersPerHour(speed));
+
+	// We want the car to have good lateral friction when heading forwards but slide a bit when
+	// the car gets sideways - but only at high speeds, we need good sticking friction when the
+	// car is stationary.
+
+	// We want to try to keep grip hard in normal circumstances to control the car effectively.
+	// But at some point in the side-slip curve the friction should break and become less grippy.
+	// This is kind-of like the difference between static and sliding friction.
+
+	// Note also. This lower friction at higher slip-angles helps massively to stop rear-end slip
+	// and this loss of speed. The lower the friction, the less rear-end slip you get.
+
+	float angle = FMathEx::DotProductToDegrees(1.0f - FMath::Abs(sideSlip));
+	float scale = TireFrictionModel->LateralGripVsSlip.GetRichCurve()->Eval(angle * TireFrictionModel->LateralGripVsSlipScale);
+	float friction = grip * scale;
+
+	// However, we do need longitudinal friction to be at play here in this case, to stop
+	// you sliding down a hill sideways for instance.
+
+	return baselineFriction * FMathEx::UnitSign(sideSlip) * friction;
+}
+
+/**
+* Calculate the longitudinal grip ratio for a slip value.
+* Slip is between -1 to 1, 0 meaning no slip, -1 meaning wheel spinning hard and 1
+* meaning braking hard (fully locked up in fact).
+***********************************************************************************/
+
+float ABaseVehicle::CalculateLongitudinalGripRatioForSlip(float slip) const
+{
+	slip = FMath::Max(slip, -1.0f);
+
+	return TireFrictionModel->LongitudinalGripVsSlip.GetRichCurve()->Eval(FMath::Abs(slip * 100.0f));
+}
+
+/**
+* Get the horizontal velocity vector for a wheel, for use in slip calculations.
+***********************************************************************************/
+
+FVector ABaseVehicle::GetHorizontalVelocity(const FVehicleWheel& wheel, const FTransform& transform)
+{
+	FVector localVelocity = transform.InverseTransformVector(wheel.Velocity);
+
+	// Kill any vertical velocity so we can just measure horizontal.
+
+	localVelocity.Z = 0.0f;
+
+	FVector velocity = transform.TransformVector(localVelocity);
+
+	check(velocity.ContainsNaN() == false);
+
+	return velocity;
+}
+
+/**
+* Get the weight acting on a wheel for this point in time, in kilograms.
+***********************************************************************************/
+
+float ABaseVehicle::GetWeightActingOnWheel(FVehicleWheel& wheel)
+{
+	float mass = Physics.CurrentMass;
+
+	if (TireFrictionModel->Model == ETireFrictionModel::Arcade)
+	{
+		// In the simplified model, all grip is applied equally. This gives us the best
+		// overall handling for GRIP vehicles, as something more realistic just makes it
+		// more unmanageable. Effectively, what we're doing here, is spreading the mass
+		// the vehicle equally across all of the available wheels and not using any kind
+		// of static loading. We tried static loading in GRIP, it destroyed the handling.
+
+		mass /= (float)GetNumWheels(true);
+	}
+
+	// For the mass acting on this wheel, get the grip ratio to use based on its current
+	// compression state.
+
+	return mass * GetGripRatio(wheel.GetActiveSensor());
+}
+
+#pragma endregion VehicleGrip
 
 #if WITH_PHYSX
 #if GRIP_ENGINE_PHYSICS_MODIFIED

@@ -82,12 +82,29 @@ void ADebugVehicleHUD::DrawHUD()
 
 				AddBox(vehicle->GetWheelBoneLocationFromIndex(index), FMath::Lerp(FLinearColor::Red, FLinearColor::Green, ratio));
 
+#pragma region VehicleGrip
+
+				FVector velocityDirection = vehicle->GetHorizontalVelocity(wheel);
+
+				velocityDirection.Normalize();
+
+				AddLine(vehicle->GetWheelBoneLocationFromIndex(index), wheelPosition + velocityDirection * 100.0f, FMath::Lerp(FLinearColor::Red, FLinearColor::Green, ratio));
+
+#pragma endregion VehicleGrip
+
 				FVector side = transform.TransformVector(FVector(0.0f, wheel.GetActiveSensor().GetSweepWidth(), 0.0f));
 
 				AddLine(vehicle->GetWheelBoneLocationFromIndex(index), wheelPosition - side, FMath::Lerp(FLinearColor::Red, FLinearColor::Green, ratio));
 				AddLine(vehicle->GetWheelBoneLocationFromIndex(index), wheelPosition + side, FMath::Lerp(FLinearColor::Red, FLinearColor::Green, ratio));
 
 				{
+
+#pragma region VehicleGrip
+
+					AddTextFloatAt(TEXT("GR"), gripRatio, wheelPosition, -10.0f, -12.0f);
+
+#pragma endregion VehicleGrip
+
 					AddTextFloatAt(TEXT("CO"), wheel.GetActiveSensor().GetCompression(), wheelPosition, -10.0f, -24.0f);
 					AddTextFloatAt(TEXT("NC"), wheel.GetActiveSensor().GetNormalizedCompression(), wheelPosition, -10.0f, -36.0f);
 
