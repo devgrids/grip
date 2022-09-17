@@ -53,6 +53,13 @@ void ADebugVehicleHUD::DrawHUD()
 
 #pragma endregion VehicleBasicForces
 
+#pragma region VehicleDrifting
+
+		AddInt(TEXT("DriftingActive"), (int32)vehicle->Physics.Drifting.Active);
+		AddInt(TEXT("RearDriftAngle"), (int32)vehicle->Physics.Drifting.RearDriftAngle);
+
+#pragma endregion VehicleDrifting
+
 		if (vehicle->Physics.Timing.TickCount > 0)
 		{
 			AddFloat(TEXT("General Clock"), vehicle->Physics.Timing.GeneralTickSum);

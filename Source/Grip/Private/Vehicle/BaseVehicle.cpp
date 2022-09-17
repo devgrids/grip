@@ -523,6 +523,16 @@ void ABaseVehicle::Tick(float deltaSeconds)
 
 	InterpolateControlInputs(deltaSeconds);
 
+#pragma endregion VehicleControls
+
+#pragma region VehicleDrifting
+
+	UpdateDriftingState(deltaSeconds);
+
+#pragma endregion VehicleDrifting
+
+#pragma region VehicleControls
+
 	UpdateSteering(deltaSeconds, xdirection, ydirection, quaternion);
 
 #pragma endregion VehicleControls
@@ -1590,6 +1600,19 @@ void ABaseVehicle::HandbrakeReleased(bool bot)
 			{
 				Control.BrakePosition = Control.BrakeInput;
 			}
+
+#pragma region VehicleDrifting
+
+			if (CanDrift() == true &&
+				(GetRealTimeClock() - Control.HandbrakePressed) < 0.333f)
+			{
+				// If we just tapped the brake then start drifting.
+
+				StartDrifting();
+			}
+
+#pragma endregion VehicleDrifting
+
 		}
 	}
 }
@@ -1963,6 +1986,64 @@ void ABaseVehicle::UpdateVisualRotation(float deltaSeconds, const FVector& xdire
 }
 
 #pragma endregion VehicleAnimation
+
+#pragma region VehicleDrifting
+
+/**
+* Update the drifting of the back end state.
+***********************************************************************************/
+
+void ABaseVehicle::UpdateDriftingState(float deltaSeconds)
+{
+	// We cancel any drifting if we get airborne, we stop steering very much,
+	// we reduce throttle below 50% or we go below 150kph.
+
+	if (IsDrifting() == true)
+	{
+		if ((Physics.ContactData.Airborne == true && Physics.ContactData.ModeTime > 0.5f) ||
+			(FMath::Abs(Control.SteeringPosition) < GRIP_STEERING_PURPOSEFUL) ||
+			(AI.BotDriver == false && Control.ThrottleInput < 0.5f) ||
+			(AI.BotDriver == true && Control.ThrottleInput < 0.1f) ||
+			(GetSpeedKPH() < 150.0f))
+		{
+			Physics.Drifting.Active = false;
+
+			if (Physics.Drifting.Timer < 0.25f)
+			{
+				Physics.Drifting.Timer += Physics.Drifting.NonDriftingTimer;
+			}
+			else
+			{
+				Physics.Drifting.Timer = 0.0f;
+			}
+		}
+	}
+
+	if (Antigravity == false)
+	{
+		if (GetDriftRatio() > 0.2f)
+		{
+			ShakeController(GetDriftRatio() * 0.3f + 0.1f, 0.10f, true, true, false, false, EDynamicForceFeedbackAction::Start);
+		}
+	}
+
+	// Manage the timer for the skidding state, used to smooth out changes in that state.
+
+	if (IsSkidding() == true)
+	{
+		Wheels.SkidTimer = 0.25f;
+	}
+	else if (IsPracticallyGrounded(75.0f) == false)
+	{
+		Wheels.SkidTimer = 0.0f;
+	}
+	else
+	{
+		Wheels.SkidTimer = FMath::Max(Wheels.SkidTimer - deltaSeconds, 0.0f);
+	}
+}
+
+#pragma endregion VehicleDrifting
 
 #pragma region VehicleSpringArm
 

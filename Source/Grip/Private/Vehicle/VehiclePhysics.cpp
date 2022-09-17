@@ -218,6 +218,12 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 
 #pragma endregion VehicleGrip
 
+#pragma region VehicleDrifting
+
+	UpdateDriftingPhysics(deltaSeconds, steeringPosition, xdirection);
+
+#pragma endregion VehicleDrifting
+
 #pragma region VehicleBasicForces
 
 	// General force scale, so we can easily modify all applied forces if desired.
@@ -328,6 +334,20 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 			FVector lateralAxis = wyNormalized;
 			FVector wvNormalized = GetHorizontalVelocity(wheel, transform);
 
+#pragma region VehicleDrifting
+
+			if (wheel.HasRearPlacement() == true)
+			{
+				// For rear wheels we modify the lateral axis for lateral grip if we're drifting,
+				// so that it matches the drift angle we're achieving.
+
+				FRotator driftRotation = FRotator(0.0f, Physics.Drifting.RearDriftAngle * ((IsFlipped() == true) ? -1.0f : 1.0f), 0.0f);
+
+				lateralAxis = wheelQuaternion.RotateVector(driftRotation.RotateVector(FVector::RightVector));
+			}
+
+#pragma endregion VehicleDrifting
+
 			if (wvNormalized.Normalize(0.01f) == true)
 			{
 				lateralSlip = FVector::DotProduct(wvNormalized, lateralAxis);
@@ -339,7 +359,15 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 
 				lateralForce = -LateralFriction(lateralGripScale, lateralSlip, wheel);
 
-				float scaleGrip = 1.0f;
+#pragma region VehicleDrifting
+
+				// The more you're drifting, the more grip boost you get. The reason for this is we introduced
+				// drifting as a way of taking corners more quickly by decreasing the turning circle with
+				// increased grip.
+
+				float scaleGrip = 1.0f + (GetDriftingRatio() * TireFrictionModel->GripBoostWhenDrifting);
+
+#pragma endregion VehicleDrifting
 
 				// Take the wheel side direction, then multiply by lateral force and the computed scales.
 
@@ -359,6 +387,21 @@ void ABaseVehicle::SubstepPhysics(float deltaSeconds, FBodyInstance* bodyInstanc
 				// The general lateral force calculation is now generally complete, and all that is left is to
 				// apply some playability hacks.
 			}
+
+#pragma region VehicleDrifting
+
+			if (FMath::Abs(lateralForce) > 100.0f)
+			{
+				// If we have considerable lateral force being applied then induce the skid audio.
+
+				float volume = FMath::Min((FMath::Abs(lateralForce) - 100.0f) / 25.0f, 1.0f);
+
+				volume *= FMath::Min(FMath::Max(GetSpeedKPH() - 150.0f, 0.0f) / 100.0f, 1.0f);
+
+				Wheels.SkidAudioVolumeTarget = FMath::Max(Wheels.SkidAudioVolumeTarget, volume);
+			}
+
+#pragma endregion VehicleDrifting
 
 			if (TireFrictionModel->Model == ETireFrictionModel::Arcade)
 			{
@@ -1215,7 +1258,17 @@ float ABaseVehicle::GetJetEnginePower(int32 numWheelsInContact, const FVector& x
 		enginePower *= 1.0f - FMath::Pow(FMath::Min((GetSpeedKPH() / (GetGearSpeedRange() * 1.8f)), 1.0f), 4.0f);
 	}
 
-	return enginePower;
+#pragma region VehicleDrifting
+
+	// Now add in the extra power that we give for drifting. If we don't do this, then
+	// vehicles can slow down too much while drifting and displeases players.
+
+	float driftingBoost = 1.0f + (GetDriftingRatio() * TireFrictionModel->SpeedBoostWhenDrifting);
+
+	return enginePower * driftingBoost;
+
+#pragma endregion VehicleDrifting
+
 }
 
 /**
@@ -1539,6 +1592,100 @@ float ABaseVehicle::GetWeightActingOnWheel(FVehicleWheel& wheel)
 }
 
 #pragma endregion VehicleGrip
+
+#pragma region VehicleDrifting
+
+/**
+* Update the drifting of the back end physics.
+***********************************************************************************/
+
+void ABaseVehicle::UpdateDriftingPhysics(float deltaSeconds, float steeringPosition, const FVector& xdirection)
+{
+	// Handle the rear-end drift.
+
+	float directionScale = 1.0f;
+	float targetDriftAngle = 0.0f;
+	float maxDrift = TireFrictionModel->RearEndDriftAngle;
+	float velocityVsDirection = FMathEx::DotProductToDegrees(FMath::Max(0.0f, FVector::DotProduct(Physics.VelocityData.VelocityDirection, xdirection)));
+
+	if (velocityVsDirection > maxDrift)
+	{
+		// Drop drifting off with velocity vector away from the direction + maximum drift vector (up to 20 degrees further).
+
+		directionScale = FMath::Lerp(1.0f, 0.0f, FMath::Min(velocityVsDirection - maxDrift, 20.0f) / 20.0f);
+	}
+
+	if (IsDrifting() == true)
+	{
+		// We're in a manually invoked drift, to set the desired angle from that.
+
+		targetDriftAngle = maxDrift * -steeringPosition * directionScale;
+	}
+
+	if (IsGrounded() == true &&
+		Wheels.SkidAudioVolumeTarget > 0.0f)
+	{
+		// See if we have some natural drift to apply based on the skid audio volume (which directly
+		// relates to the tire side-loading). This is a game play improvement, were many players were
+		// oblivious they could drift, so here we give them some drift automatically.
+
+		float angle = maxDrift * -steeringPosition * directionScale * Wheels.SkidAudioVolumeTarget * 0.666f;
+
+		if (FMath::Abs(targetDriftAngle) < FMath::Abs(angle))
+		{
+			targetDriftAngle = angle;
+		}
+	}
+
+	// If we were airborne for a little while, and have recently landed, give a little time for no
+	// drifting and then give a short time to ease drifting back in. This gives you a chance
+	// straighten up after a landing without drifting interfering.
+
+	if (targetDriftAngle != 0.0f &&
+		Physics.ContactData.Airborne == false &&
+		Physics.ContactData.LastModeTime > 1.5f)
+	{
+		if (Physics.ContactData.ModeTime < 1.5f)
+		{
+			targetDriftAngle = 0.0f;
+		}
+		else if (Physics.ContactData.ModeTime - 1.5f < 2.0f)
+		{
+			targetDriftAngle *= (Physics.ContactData.ModeTime - 1.5f) / 2.0f;
+		}
+	}
+
+	// Smooth towards the desired drift angle.
+
+	float driftRatio = 1.0f;
+
+	if (FMath::Abs(Physics.Drifting.RearDriftAngle) >= FMath::Abs(targetDriftAngle))
+	{
+		// Coming out of drift.
+
+		driftRatio = FMathEx::GetSmoothingRatio(0.8f, deltaSeconds);
+	}
+	else
+	{
+		// Going into drift.
+
+		float difference = 0.975f;
+
+		if (FMath::Abs(targetDriftAngle) > KINDA_SMALL_NUMBER)
+		{
+			driftRatio = FMath::Abs(Physics.Drifting.RearDriftAngle) / FMath::Abs(targetDriftAngle);
+			driftRatio = FMath::Sqrt(driftRatio);
+		}
+
+		driftRatio = FMathEx::GetSmoothingRatio(FMath::Lerp(0.9f, 0.975f, difference), deltaSeconds);
+	}
+
+	Physics.Drifting.RearDriftAngle = FMath::Lerp(targetDriftAngle, Physics.Drifting.RearDriftAngle, driftRatio);
+
+	Wheels.SkidAudioVolumeTarget = 0.0f;
+}
+
+#pragma endregion VehicleDrifting
 
 #if WITH_PHYSX
 #if GRIP_ENGINE_PHYSICS_MODIFIED

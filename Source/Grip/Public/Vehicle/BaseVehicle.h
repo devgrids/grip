@@ -1386,6 +1386,41 @@ private:
 
 #pragma endregion VehicleLaunch
 
+#pragma region VehicleDrifting
+
+private:
+
+	// Is the vehicle in a state where drifting is possible?
+	bool CanDrift() const
+	{ return (Physics.ContactData.Airborne == false && GetSpeedKPH() > 100.0f && Control.ThrottleInput > 0.5f && FMath::Abs(Control.SteeringPosition) > 0.75f); }
+
+	// Is the bot vehicle in a state where drifting is possible?
+	bool AICanDrift() const
+	{ return (Physics.ContactData.Airborne == false && GetSpeedKPH() > 250.0f && Control.ThrottleInput > 0.1f && FMath::Abs(Control.SteeringPosition) > 0.5f); }
+
+	// Start drifting.
+	void StartDrifting()
+	{
+		if (Physics.Drifting.Active == false)
+		{
+			Physics.Drifting.Active = true;
+			Physics.Drifting.NonDriftingTimer = Physics.Drifting.Timer;
+			Physics.Drifting.Timer = 0.0f;
+		}
+	}
+
+	// Update the drifting of the back end state.
+	void UpdateDriftingState(float deltaSeconds);
+
+	// Update the drifting of the back end physics.
+	void UpdateDriftingPhysics(float deltaSeconds, float steeringPosition, const FVector& xdirection);
+
+	// Is this vehicle skidding?
+	bool IsSkidding(bool removeGlitches = false) const
+	{ return (Antigravity == true) ? false : ((removeGlitches == true) ? (Wheels.SkidAudioVolumeTarget > 0.25f || Wheels.SkidTimer > 0.0f) : (Wheels.SkidAudioVolumeTarget > 0.25f)); }
+
+#pragma endregion VehicleDrifting
+
 #pragma region PickupsAvailable
 
 public:
